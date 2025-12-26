@@ -3,7 +3,7 @@
   "Name": "Volcengine OCR",
   "Description": "Volcengine OCR plugin for STranslate",
   "Author": "ybhgl",
-  "Version": "1.0.0",
+  "Version": "1.0.1",
   "Website": "https://github.com/ybhgl/STranslate.Plugin.Ocr.Volcengine",
   "ExecuteFileName": "STranslate.Plugin.Ocr.Volcengine.dll",
   "IconPath": "icon.png"
