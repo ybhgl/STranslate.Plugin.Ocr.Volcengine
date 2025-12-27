@@ -2,6 +2,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using STranslate.Plugin.Ocr.Volcengine.View;
 using STranslate.Plugin.Ocr.Volcengine.ViewModel;
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Controls;
@@ -156,9 +157,19 @@ public class Main : ObservableObject, IOcrPlugin, ILlm
         var rawData = ExtractResponseText(jsonDoc.RootElement, response);
 
         var result = new OcrResult();
-        foreach (var item in rawData.ToString().Split("\n").ToList().Select(item => new OcrContent { Text = item}))
+        if (TryParseOcrContents(rawData, out var contents) && contents.Count > 0)
         {
-            result.OcrContents.Add(item);
+            foreach (var item in contents)
+            {
+                result.OcrContents.Add(item);
+            }
+        }
+        else
+        {
+            foreach (var item in rawData.Split("\n").ToList().Select(item => new OcrContent { Text = item.TrimEnd('\r') }))
+            {
+                result.OcrContents.Add(item);
+            }
         }
 
         return result;
@@ -245,6 +256,358 @@ public class Main : ObservableObject, IOcrPlugin, ILlm
 
         return ImageQuality.Medium;
     }
+
+    private static bool TryParseOcrContents(string rawText, out List<OcrContent> contents)
+    {
+        contents = [];
+        var jsonPayload = ExtractJsonPayload(rawText);
+        if (!LooksLikeJson(jsonPayload))
+            return false;
+
+        try
+        {
+            using var jsonDoc = JsonDocument.Parse(jsonPayload);
+            var root = jsonDoc.RootElement;
+            if (root.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in root.EnumerateArray())
+                {
+                    if (TryReadOcrContent(item, out var content))
+                        contents.Add(content);
+                }
+
+                return contents.Count > 0;
+            }
+
+            if (root.ValueKind == JsonValueKind.Object)
+            {
+                if (TryReadOcrContent(root, out var single))
+                    contents.Add(single);
+
+                if (TryGetOcrArray(root, out var arrayElement))
+                {
+                    foreach (var item in arrayElement.EnumerateArray())
+                    {
+                        if (TryReadOcrContent(item, out var content))
+                            contents.Add(content);
+                    }
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+
+        return contents.Count > 0;
+    }
+
+    private static bool TryGetOcrArray(JsonElement root, out JsonElement arrayElement)
+    {
+        var keys = new[]
+        {
+            "data",
+            "items",
+            "results",
+            "result",
+            "ocr",
+            "lines",
+            "blocks",
+            "contents"
+        };
+
+        foreach (var key in keys)
+        {
+            if (root.TryGetProperty(key, out arrayElement) && arrayElement.ValueKind == JsonValueKind.Array)
+                return true;
+        }
+
+        arrayElement = default;
+        return false;
+    }
+
+    private static bool TryReadOcrContent(JsonElement element, out OcrContent content)
+    {
+        content = new OcrContent();
+        if (element.ValueKind == JsonValueKind.String)
+        {
+            content.Text = element.GetString() ?? string.Empty;
+            return !string.IsNullOrWhiteSpace(content.Text);
+        }
+
+        if (element.ValueKind != JsonValueKind.Object)
+            return false;
+
+        if (!TryGetText(element, out var text) || string.IsNullOrWhiteSpace(text))
+            return false;
+
+        content.Text = text;
+
+        if (TryGetBoxElement(element, out var boxElement) &&
+            TryParseBoxPoints(boxElement, out var points) &&
+            points.Count > 0)
+        {
+            content.BoxPoints ??= new();
+            content.BoxPoints.Clear();
+            foreach (var point in points)
+            {
+                content.BoxPoints.Add(point);
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryGetText(JsonElement element, out string? text)
+    {
+        var keys = new[]
+        {
+            "text",
+            "content",
+            "value",
+            "line"
+        };
+
+        foreach (var key in keys)
+        {
+            if (element.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String)
+            {
+                text = value.GetString();
+                return true;
+            }
+        }
+
+        text = null;
+        return false;
+    }
+
+    private static bool TryGetBoxElement(JsonElement element, out JsonElement boxElement)
+    {
+        var keys = new[]
+        {
+            "box_points",
+            "boxPoints",
+            "box",
+            "points",
+            "bbox",
+            "boundingBox",
+            "bounding_box",
+            "box_2d"
+        };
+
+        foreach (var key in keys)
+        {
+            if (element.TryGetProperty(key, out boxElement))
+                return true;
+        }
+
+        boxElement = default;
+        return false;
+    }
+
+    private static bool TryParseBoxPoints(JsonElement element, out List<BoxPoint> points)
+    {
+        points = [];
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            if (TryParsePointObject(element, out var point))
+            {
+                points.Add(point);
+                return true;
+            }
+
+            if (TryParseRectObject(element, out var rectPoints))
+            {
+                points.AddRange(rectPoints);
+                return true;
+            }
+
+            if (TryParseNamedVertices(element, out var vertexPoints))
+            {
+                points.AddRange(vertexPoints);
+                return true;
+            }
+
+            return false;
+        }
+
+        if (element.ValueKind != JsonValueKind.Array)
+            return false;
+
+        var numericBuffer = new List<float>();
+        foreach (var item in element.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.Array)
+            {
+                if (TryParsePointArray(item, out var point))
+                    points.Add(point);
+
+                continue;
+            }
+
+            if (item.ValueKind == JsonValueKind.Object)
+            {
+                if (TryParsePointObject(item, out var point))
+                    points.Add(point);
+
+                continue;
+            }
+
+            if (TryGetFloat(item, out var value))
+                numericBuffer.Add(value);
+        }
+
+        if (points.Count == 0 && numericBuffer.Count >= 2)
+        {
+            for (var i = 0; i + 1 < numericBuffer.Count; i += 2)
+            {
+                points.Add(new BoxPoint(numericBuffer[i], numericBuffer[i + 1]));
+            }
+        }
+
+        return points.Count > 0;
+    }
+
+    private static bool TryParsePointArray(JsonElement element, out BoxPoint point)
+    {
+        point = default!;
+        if (element.ValueKind != JsonValueKind.Array)
+            return false;
+
+        var coords = element.EnumerateArray().ToArray();
+        if (coords.Length < 2)
+            return false;
+
+        if (!TryGetFloat(coords[0], out var x) || !TryGetFloat(coords[1], out var y))
+            return false;
+
+        point = new BoxPoint(x, y);
+        return true;
+    }
+
+    private static bool TryParsePointObject(JsonElement element, out BoxPoint point)
+    {
+        point = default!;
+        if (element.ValueKind != JsonValueKind.Object)
+            return false;
+
+        if (element.TryGetProperty("x", out var xElement) &&
+            element.TryGetProperty("y", out var yElement) &&
+            TryGetFloat(xElement, out var x) &&
+            TryGetFloat(yElement, out var y))
+        {
+            point = new BoxPoint(x, y);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryParseRectObject(JsonElement element, out List<BoxPoint> points)
+    {
+        points = [];
+        if (element.ValueKind != JsonValueKind.Object)
+            return false;
+
+        if (element.TryGetProperty("left", out var leftElement) &&
+            element.TryGetProperty("top", out var topElement) &&
+            element.TryGetProperty("right", out var rightElement) &&
+            element.TryGetProperty("bottom", out var bottomElement) &&
+            TryGetFloat(leftElement, out var left) &&
+            TryGetFloat(topElement, out var top) &&
+            TryGetFloat(rightElement, out var right) &&
+            TryGetFloat(bottomElement, out var bottom))
+        {
+            points.Add(new BoxPoint(left, top));
+            points.Add(new BoxPoint(right, top));
+            points.Add(new BoxPoint(right, bottom));
+            points.Add(new BoxPoint(left, bottom));
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryParseNamedVertices(JsonElement element, out List<BoxPoint> points)
+    {
+        points = [];
+        if (element.ValueKind != JsonValueKind.Object)
+            return false;
+
+        var keys = new[]
+        {
+            "topLeft",
+            "topRight",
+            "bottomRight",
+            "bottomLeft"
+        };
+
+        foreach (var key in keys)
+        {
+            if (!element.TryGetProperty(key, out var vertex))
+                return false;
+
+            if (vertex.ValueKind == JsonValueKind.Array && TryParsePointArray(vertex, out var arrayPoint))
+            {
+                points.Add(arrayPoint);
+                continue;
+            }
+
+            if (vertex.ValueKind == JsonValueKind.Object && TryParsePointObject(vertex, out var objectPoint))
+            {
+                points.Add(objectPoint);
+                continue;
+            }
+
+            return false;
+        }
+
+        return points.Count == 4;
+    }
+
+    private static bool TryGetFloat(JsonElement element, out float value)
+    {
+        if (element.ValueKind == JsonValueKind.Number)
+        {
+            if (element.TryGetSingle(out value))
+                return true;
+
+            if (element.TryGetDouble(out var doubleValue))
+            {
+                value = (float)doubleValue;
+                return true;
+            }
+        }
+
+        if (element.ValueKind == JsonValueKind.String &&
+            float.TryParse(element.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out value))
+        {
+            return true;
+        }
+
+        value = 0;
+        return false;
+    }
+
+    private static string ExtractJsonPayload(string rawText)
+    {
+        var trimmed = rawText.Trim();
+        if (!trimmed.StartsWith("```", StringComparison.Ordinal))
+            return trimmed;
+
+        var firstNewline = trimmed.IndexOf('\n');
+        if (firstNewline < 0)
+            return trimmed;
+
+        var lastFence = trimmed.LastIndexOf("```", StringComparison.Ordinal);
+        if (lastFence <= firstNewline)
+            return trimmed;
+
+        return trimmed.Substring(firstNewline + 1, lastFence - firstNewline - 1).Trim();
+    }
+
+    private static bool LooksLikeJson(string text)
+        => text.StartsWith("{", StringComparison.Ordinal) || text.StartsWith("[", StringComparison.Ordinal);
 
     private string ConvertLanguage(LangEnum langEnum) => langEnum switch
     {

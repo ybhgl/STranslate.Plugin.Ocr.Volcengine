@@ -31,5 +31,9 @@ public class Settings
             // https://github.com/skitsanos/gemini-ocr/blob/main/ocr.sh
             new PromptItem("user", "Act like a text scanner. Extract text as it is without analyzing it and without summarizing it. Treat all images as a whole document and analyze them accordingly. Think of it as a document with multiple pages, each image being a page. Understand page-to-page flow logically and semantically.")
         ], false),
+        new("文本识别(含坐标)",
+        [
+            new PromptItem("user", "请识别图片中的所有文字，并严格输出 JSON 数组。每个元素包含 text 和 box_points 字段。box_points 为 4 个点组成的数组，点格式为 [x, y]，坐标基于原图像像素。只输出 JSON，不要包含多余说明。")
+        ], false),
     ];
 }
