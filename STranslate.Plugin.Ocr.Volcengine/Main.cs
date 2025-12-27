@@ -70,8 +70,6 @@ public class Main : ObservableObject, IOcrPlugin, ILlm
             uriBuilder.Path = "/api/v3/responses";
 
         var imageQuality = GetImageQualityOrDefault();
-        if (imageQuality == ImageQuality.High)
-            return new OcrResult().Fail($"Not supported, please use {Context.GetTranslation("ImageQualityLow")} or {Context.GetTranslation("ImageQualityMedium")}");
 
         // 处理图片数据
         var base64Str = Convert.ToBase64String(request.ImageData);
